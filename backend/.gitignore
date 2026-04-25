@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+kiosk.db
+kiosk.db-*
