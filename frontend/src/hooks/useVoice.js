@@ -45,7 +45,7 @@ function isAgentEcho(heard, agentReply) {
   return a.includes(h.slice(0, Math.min(h.length, 20)));
 }
 
-export function useVoice({ locale = 'en-US', onTranscript } = {}) {
+export function useVoice({ locale = 'en-US', onTranscript, whisperMode = false, onDetectedLanguage } = {}) {
   const recogRef = useRef(null);
   const audioCtxRef = useRef(null);
   const audioElRef = useRef(null);
@@ -58,6 +58,17 @@ export function useVoice({ locale = 'en-US', onTranscript } = {}) {
   const lastAgentReplyRef = useRef('');
   const cancelSpeechRef = useRef(null);
 
+  // Whisper-mode (auto-detect) recording state
+  const micStreamRef = useRef(null);
+  const recorderRef = useRef(null);
+  const recordChunksRef = useRef([]);
+  const vadCtxRef = useRef(null);
+  const vadAnalyserRef = useRef(null);
+  const vadRafRef = useRef(0);
+  const isRecordingRef = useRef(false);
+  const speechStartedRef = useRef(false);
+  const silenceTimerRef = useRef(0);
+
   const [enabled, setEnabled] = useState(true);
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
@@ -65,12 +76,13 @@ export function useVoice({ locale = 'en-US', onTranscript } = {}) {
   const [mouthOpen, setMouthOpen] = useState(0);
 
   const supported =
-    Boolean(SpeechRecognitionCtor) &&
     typeof window !== 'undefined' &&
-    'speechSynthesis' in window;
+    'speechSynthesis' in window &&
+    (whisperMode ? Boolean(navigator?.mediaDevices?.getUserMedia) : Boolean(SpeechRecognitionCtor));
 
-  // ----- Recognition setup ----------------------------------------------
+  // ----- Recognition setup (browser SR — non-Whisper mode) -------------
   useEffect(() => {
+    if (whisperMode) return undefined;             // Whisper path skips SR
     if (!SpeechRecognitionCtor) return undefined;
     const r = new SpeechRecognitionCtor();
     r.continuous = true;
@@ -81,7 +93,7 @@ export function useVoice({ locale = 'en-US', onTranscript } = {}) {
     return () => {
       try { r.abort(); } catch { /* noop */ }
     };
-  }, [locale]);
+  }, [locale, whisperMode]);
 
   const safeStart = useCallback(() => {
     const r = recogRef.current;
@@ -96,6 +108,7 @@ export function useVoice({ locale = 'en-US', onTranscript } = {}) {
   }, [safeStart]);
 
   useEffect(() => {
+    if (whisperMode) return;
     const r = recogRef.current;
     if (!r) return;
     r.onstart = () => setListening(true);
@@ -144,12 +157,149 @@ export function useVoice({ locale = 'en-US', onTranscript } = {}) {
     // Auto-start once handlers are wired so a brand-new recogniser (e.g.
     // after a language change) immediately joins the streaming loop.
     if (desiredRef.current) scheduleRestart(0);
-  }, [onTranscript, scheduleRestart, locale]);
+  }, [onTranscript, scheduleRestart, locale, whisperMode]);
+
+  // ----- Whisper-mode (auto-detect) recording ---------------------------
+  // Voice-activity-driven recorder: capture audio while user speaks, stop
+  // on ~1.2s of silence, send blob to /api/stt, then resume.
+
+  const stopWhisperRecording = useCallback(() => {
+    cancelAnimationFrame(vadRafRef.current);
+    vadRafRef.current = 0;
+    clearTimeout(silenceTimerRef.current);
+    silenceTimerRef.current = 0;
+    isRecordingRef.current = false;
+    speechStartedRef.current = false;
+    setListening(false);
+    try { recorderRef.current?.state === 'recording' && recorderRef.current.stop(); } catch { /* noop */ }
+    try { micStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch { /* noop */ }
+    micStreamRef.current = null;
+    recorderRef.current = null;
+    try { vadCtxRef.current?.close(); } catch { /* noop */ }
+    vadCtxRef.current = null;
+    vadAnalyserRef.current = null;
+  }, []);
+
+  const sendWhisperBlob = useCallback(async (blob) => {
+    if (!blob || blob.size < 1200) return; // ignore < ~50ms of audio
+    try {
+      const fd = new FormData();
+      fd.append('audio', blob, 'utterance.webm');
+      fd.append('language', 'auto');
+      const res = await fetch('/api/stt', { method: 'POST', body: fd });
+      if (!res.ok) return;
+      const data = await res.json();
+      const text = (data.text || '').trim();
+      if (!text) return;
+      if (data.language && onDetectedLanguage) onDetectedLanguage(data.language);
+      if (onTranscript) onTranscript(text, data.language || null);
+    } catch (e) {
+      // network blip — drop the utterance, VAD loop continues
+      console.warn('[whisper] /api/stt failed', e);
+    }
+  }, [onTranscript, onDetectedLanguage]);
+
+  const startWhisperRecording = useCallback(async () => {
+    if (!whisperMode || isRecordingRef.current) return;
+    if (!navigator?.mediaDevices?.getUserMedia) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      micStreamRef.current = stream;
+
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new Ctx();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      source.connect(analyser);
+      vadCtxRef.current = ctx;
+      vadAnalyserRef.current = analyser;
+
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const SPEECH_THRESHOLD = 0.025;       // RMS amplitude
+      const SILENCE_MS = 1200;
+      const MIN_SPEECH_MS = 350;
+      let speechStartTs = 0;
+
+      const startUtterance = () => {
+        if (recorderRef.current?.state === 'recording') return;
+        recordChunksRef.current = [];
+        const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        mr.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordChunksRef.current.push(e.data); };
+        mr.onstop = () => {
+          const chunks = recordChunksRef.current;
+          recordChunksRef.current = [];
+          if (!chunks.length) return;
+          const blob = new Blob(chunks, { type: 'audio/webm' });
+          // Only send if utterance was at least MIN_SPEECH_MS long.
+          if (Date.now() - speechStartTs >= MIN_SPEECH_MS) sendWhisperBlob(blob);
+        };
+        mr.start(250);
+        recorderRef.current = mr;
+        speechStartTs = Date.now();
+        setListening(true);
+      };
+
+      const endUtterance = () => {
+        const mr = recorderRef.current;
+        if (mr && mr.state === 'recording') {
+          try { mr.stop(); } catch { /* noop */ }
+        }
+        setListening(false);
+        speechStartedRef.current = false;
+      };
+
+      const tick = () => {
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) {
+          const v = (data[i] - 128) / 128;
+          sum += v * v;
+        }
+        const rms = Math.sqrt(sum / data.length);
+
+        // While agent speaks, treat user audio as potential barge-in but
+        // only after a clear, sustained user voice burst.
+        if (speakingRef.current && rms < SPEECH_THRESHOLD * 1.5) {
+          // skip — likely echo or quiet
+        } else if (rms > SPEECH_THRESHOLD) {
+          if (speakingRef.current) cancelSpeechRef.current && cancelSpeechRef.current();
+          if (!speechStartedRef.current) {
+            speechStartedRef.current = true;
+            startUtterance();
+          }
+          clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = 0;
+        } else if (speechStartedRef.current && !silenceTimerRef.current) {
+          silenceTimerRef.current = setTimeout(() => {
+            silenceTimerRef.current = 0;
+            endUtterance();
+          }, SILENCE_MS);
+        }
+
+        vadRafRef.current = requestAnimationFrame(tick);
+      };
+
+      isRecordingRef.current = true;
+      vadRafRef.current = requestAnimationFrame(tick);
+    } catch (e) {
+      console.warn('[whisper] getUserMedia failed', e);
+      desiredRef.current = false;
+      setEnabled(false);
+    }
+  }, [sendWhisperBlob, whisperMode]);
 
   // ----- Mute toggle / external start-stop ------------------------------
   const setListeningEnabled = useCallback((on) => {
     desiredRef.current = on;
     setEnabled(on);
+    if (whisperMode) {
+      if (on) startWhisperRecording();
+      else stopWhisperRecording();
+      return;
+    }
     const r = recogRef.current;
     if (!r) return;
     if (on) scheduleRestart(0);
@@ -157,7 +307,18 @@ export function useVoice({ locale = 'en-US', onTranscript } = {}) {
       clearTimeout(restartTimerRef.current);
       try { r.stop(); } catch { /* noop */ }
     }
-  }, [scheduleRestart]);
+  }, [scheduleRestart, whisperMode, startWhisperRecording, stopWhisperRecording]);
+
+  // Restart recording when whisperMode flips on after the user has primed.
+  useEffect(() => {
+    if (whisperMode && desiredRef.current && !isRecordingRef.current) {
+      startWhisperRecording();
+    }
+    if (!whisperMode && isRecordingRef.current) {
+      stopWhisperRecording();
+    }
+    return undefined;
+  }, [whisperMode, startWhisperRecording, stopWhisperRecording]);
 
   const start = useCallback(() => setListeningEnabled(true), [setListeningEnabled]);
   const stop = useCallback(() => setListeningEnabled(false), [setListeningEnabled]);
@@ -265,18 +426,47 @@ export function useVoice({ locale = 'en-US', onTranscript } = {}) {
     });
   }), [stopAnalyser]);
 
-  const browserSpeak = useCallback((text) => new Promise((resolve) => {
+  const browserSpeak = useCallback((text, langOverride) => new Promise((resolve) => {
     if (!('speechSynthesis' in window)) { resolve(); return; }
     try { window.speechSynthesis.cancel(); } catch { /* noop */ }
+    const targetLocale = langOverride || locale;
     const utter = new SpeechSynthesisUtterance(text);
-    utter.lang = locale;
-    utter.rate = 0.98;
+    utter.lang = targetLocale;
+    // Slow, deliberate cadence — railway-announcer feel.
+    utter.rate = 0.86;
     utter.pitch = 1.0;
+    utter.volume = 1.0;
+    const baseLang = targetLocale.split('-')[0];
+    // Score voices and pick the best native one. Prefer:
+    //  1. Exact locale match (te-IN over te-...)
+    //  2. "Natural"/"Neural"/"Online" voices (Microsoft Edge/Win11 high-quality)
+    //  3. Any voice whose language code begins with our base lang
+    const scoreVoice = (v) => {
+      let s = 0;
+      if (v.lang === targetLocale) s += 100;
+      else if (v.lang.startsWith(baseLang)) s += 40;
+      const n = (v.name || '').toLowerCase();
+      if (n.includes('natural')) s += 30;
+      if (n.includes('neural')) s += 25;
+      if (n.includes('online')) s += 15;
+      // Common Windows Indian voices.
+      if (n.includes('heera')) s += 20;     // Telugu
+      if (n.includes('shruti')) s += 20;    // Telugu (Azure)
+      if (n.includes('mohan')) s += 18;     // Telugu (Azure)
+      if (n.includes('kalpana')) s += 18;   // Hindi
+      if (n.includes('hemant')) s += 18;    // Hindi
+      if (n.includes('valluvar')) s += 18;  // Tamil
+      if (n.includes('pallavi')) s += 18;   // Tamil
+      return s;
+    };
     const pickVoice = () => {
       const voices = window.speechSynthesis.getVoices();
-      const v = voices.find((v) => v.lang === locale)
-        || voices.find((v) => v.lang.startsWith(locale.split('-')[0]));
-      if (v) utter.voice = v;
+      const ranked = voices
+        .filter((v) => v.lang === targetLocale || v.lang.startsWith(baseLang))
+        .map((v) => ({ v, s: scoreVoice(v) }))
+        .sort((a, b) => b.s - a.s);
+      const best = ranked[0]?.v;
+      if (best) utter.voice = best;
       window.speechSynthesis.speak(utter);
     };
     utter.onstart = () => { setSpeaking(true); speakingRef.current = true; };
@@ -299,6 +489,9 @@ export function useVoice({ locale = 'en-US', onTranscript } = {}) {
     speakingRef.current = true;
     // Keep the recogniser ON for barge-in. Make sure it's running.
     if (desiredRef.current) safeStart();
+    // Map kiosk lang code -> BCP-47 locale for browser TTS voice selection.
+    const localeFor = { en: 'en-IN', te: 'te-IN', hi: 'hi-IN', ta: 'ta-IN' };
+    const browserLocale = localeFor[language] || locale;
     try {
       const res = await fetch('/api/tts', {
         method: 'POST',
@@ -309,14 +502,15 @@ export function useVoice({ locale = 'en-US', onTranscript } = {}) {
         const blob = await res.blob();
         await playAudio(blob);
       } else {
-        await browserSpeak(text);
+        // Backend returned 204 (or non-200) → use OS-native voice for the lang.
+        await browserSpeak(text, browserLocale);
       }
     } catch {
-      await browserSpeak(text);
+      await browserSpeak(text, browserLocale);
     }
     speakingRef.current = false;
     if (desiredRef.current) scheduleRestart(0);
-  }, [browserSpeak, cancelSpeech, playAudio, safeStart, scheduleRestart]);
+  }, [browserSpeak, cancelSpeech, playAudio, safeStart, scheduleRestart, locale]);
 
   return {
     supported,

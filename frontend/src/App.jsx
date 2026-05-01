@@ -8,6 +8,8 @@ import EmergencyButton, { EmergencyOverlay } from './components/EmergencyButton.
 import LanguageToggle from './components/LanguageToggle.jsx';
 import IndoorMap from './components/IndoorMap.jsx';
 import Avatar from './components/Avatar.jsx';
+import PatientRegistration from './components/PatientRegistration.jsx';
+import PresenceDetector from './components/PresenceDetector.jsx';
 
 const IDLE_MS = 60_000;          // session auto-clear after a full minute
 const NUDGE_INTERVAL_MS = 5_000; // re-engage every 5 s while idle
@@ -15,6 +17,7 @@ const MAX_NUDGES = 3;            // before reverting to home
 
 export default function App() {
   const [lang, setLang] = useState('en');
+  const [autoDetect, setAutoDetect] = useState(false);
   const [messages, setMessages] = useState([]);
   const [options, setOptions] = useState([]);
   const [mapTarget, setMapTarget] = useState(null);
@@ -24,6 +27,10 @@ export default function App() {
   const [engine, setEngine] = useState(null);
   const [aiEnabled, setAiEnabled] = useState(false);
   const [primed, setPrimed] = useState(false);    // first user gesture happened
+  const [showRegister, setShowRegister] = useState(false);
+  const [recognizedPatient, setRecognizedPatient] = useState(null);
+  const [presenceOn, setPresenceOn] = useState(true);   // ambient face detection
+  const recognizedIdRef = useRef(null);
   const lastReplyRef = useRef('');
   const idleTimerRef = useRef(null);
   const nudgeTimerRef = useRef(null);
@@ -36,9 +43,20 @@ export default function App() {
   }, []);
 
   // Voice hook — listens continuously after the first interaction.
+  // In auto mode we use server-side Whisper STT (true audio-based language
+  // detection); in explicit-lang modes the browser's SpeechRecognition is
+  // faster and free.
   const handleTranscriptRef = useRef(() => {});
-  const onTranscript = useCallback((text) => handleTranscriptRef.current(text), []);
-  const voice = useVoice({ locale: t.locale, onTranscript });
+  const onTranscript = useCallback((text, hintLang) => handleTranscriptRef.current(text, hintLang), []);
+  const onDetectedLanguage = useCallback((detected) => {
+    if (detected && ['en', 'te', 'hi', 'ta'].includes(detected)) setLang(detected);
+  }, []);
+  const voice = useVoice({
+    locale: t.locale,
+    onTranscript,
+    whisperMode: autoDetect,
+    onDetectedLanguage,
+  });
 
   // ---- session-clear after 60 s of total inactivity ---------------------
   const resetIdle = useCallback(() => {
@@ -111,6 +129,16 @@ export default function App() {
   const applyResponse = useCallback((res, userText) => {
     setError(null);
     nudgeCountRef.current = 0;
+    // Auto-detect: switch UI language to whatever the backend detected.
+    const replyLang =
+      autoDetect && res.detected_language && res.detected_language !== lang
+        ? res.detected_language
+        : lang;
+    if (replyLang !== lang) {
+      // eslint-disable-next-line no-console
+      console.info('[auto-lang] switching', lang, '->', replyLang);
+      setLang(replyLang);
+    }
     setMessages((prev) => {
       const next = userText
         ? [...prev, { who: 'user', text: userText }]
@@ -123,39 +151,51 @@ export default function App() {
     setEngine(res.engine || null);
     if (res.alert) {
       setAlert(true);
-      sendStaffAlert({ intent: res.intent, language: lang }).catch(() => {});
+      sendStaffAlert({ intent: res.intent, language: replyLang }).catch(() => {});
     }
     if (res.reply) {
       lastReplyRef.current = res.reply;
-      voice.speak(res.reply, lang);
+      voice.speak(res.reply, replyLang);
     }
-  }, [voice, lang]);
+  }, [voice, lang, autoDetect]);
 
-  const submitText = useCallback(async (text) => {
+  const submitText = useCallback(async (text, hintLang = null) => {
     const trimmed = (text || '').trim();
     if (!trimmed) return;
     cancelNudge();
     nudgeCountRef.current = 0;
     setThinking(true);
     try {
-      const res = await sendIntent(trimmed, lang);
+      // Prefer Whisper's audio-detected language if provided; else pass
+      // 'auto' for backend-side text detection; else explicit lang.
+      const apiLang = hintLang
+        ? hintLang
+        : autoDetect
+          ? 'auto'
+          : lang;
+      const res = await sendIntent(trimmed, apiLang);
       applyResponse(res, trimmed);
     } catch (err) {
       setError(String(err.message || err));
     } finally {
       setThinking(false);
     }
-  }, [applyResponse, cancelNudge, lang]);
+  }, [applyResponse, cancelNudge, lang, autoDetect]);
 
   useEffect(() => {
-    handleTranscriptRef.current = (text) => submitText(text);
+    handleTranscriptRef.current = (text, hintLang) => submitText(text, hintLang);
   }, [submitText]);
 
   const submitCard = useCallback(async (cardId, opt) => {
     cancelNudge();
     nudgeCountRef.current = 0;
-    setThinking(true);
     if (!primed) setPrimed(true);
+    // Patient registration card: open modal locally — no backend round-trip.
+    if (cardId === 'register') {
+      setShowRegister(true);
+      return;
+    }
+    setThinking(true);
     const userEcho = opt?.label || t.cards[cardId] || cardId;
     try {
       if (cardId === 'repeat' && lastReplyRef.current) {
@@ -228,7 +268,18 @@ export default function App() {
           )}
         </div>
         <div className="topbar__right">
-          <LanguageToggle value={lang} onChange={setLang} languages={LANGUAGES} />
+          <LanguageToggle
+            value={autoDetect ? 'auto' : lang}
+            onChange={(code) => {
+              if (code === 'auto') {
+                setAutoDetect(true);
+              } else {
+                setAutoDetect(false);
+                setLang(code);
+              }
+            }}
+            languages={LANGUAGES}
+          />
           <button
             className={`mic-pill${voice.enabled && primed ? ' mic-pill--on' : ''}${voice.listening ? ' mic-pill--live' : ''}`}
             onClick={toggleMic}
@@ -257,6 +308,17 @@ export default function App() {
         </section>
 
         <section className="main__chat">
+          {recognizedPatient && (
+            <div className="welcome-banner">
+              <span style={{ fontSize: 22 }}>👋</span>
+              <span>
+                {lang === 'te' && `స్వాగతం, ${recognizedPatient.name}! సందర్శన #${recognizedPatient.visit_count}`}
+                {lang === 'hi' && `स्वागत है, ${recognizedPatient.name}! यात्रा #${recognizedPatient.visit_count}`}
+                {lang === 'ta' && `வரவேற்கிறோம், ${recognizedPatient.name}! வருகை #${recognizedPatient.visit_count}`}
+                {lang === 'en' && `Welcome back, ${recognizedPatient.name}! Visit #${recognizedPatient.visit_count}`}
+              </span>
+            </div>
+          )}
           {showHome ? (
             <div className="welcome">
               <h1 className="welcome__title">{t.welcomeTitle}</h1>
@@ -289,6 +351,60 @@ export default function App() {
       </main>
 
       <EmergencyOverlay active={alert} ackLabel={t.emergencyAck} />
+
+      <PresenceDetector
+        active={presenceOn && !alert}
+        language={lang}
+        onRecognized={(p) => {
+          // Avoid spamming the welcome banner if same patient is in front of cam.
+          if (recognizedIdRef.current === p.id) return;
+          recognizedIdRef.current = p.id;
+          setRecognizedPatient(p);
+          const targetLang = (p.language && ['en', 'te', 'hi', 'ta'].includes(p.language)) ? p.language : lang;
+          if (targetLang !== lang) {
+            setAutoDetect(false);
+            setLang(targetLang);
+          }
+          if (!primed) setPrimed(true);
+          // Speak a quick localised greeting via TTS — instant, no GPT-4o call.
+          const greetings = {
+            en: `Welcome back, ${p.name}. Visit number ${p.visit_count}.`,
+            te: `స్వాగతం, ${p.name}. సందర్శన నంబర్ ${p.visit_count}.`,
+            hi: `स्वागत है, ${p.name}. यात्रा संख्या ${p.visit_count}.`,
+            ta: `வரவேற்கிறோம், ${p.name}. வருகை எண் ${p.visit_count}.`,
+          };
+          voice.speak(greetings[targetLang] || greetings.en, targetLang);
+          // Banner auto-clears after 8s; reset id so they can be re-greeted on a new session.
+          setTimeout(() => {
+            setRecognizedPatient(null);
+            recognizedIdRef.current = null;
+          }, 8000);
+        }}
+        onUnknownFaceLingering={() => {
+          // Don't pop the modal if user is already mid-conversation.
+          if (showRegister || alert || messages.length > 0) return;
+          setShowRegister(true);
+        }}
+      />
+
+      {showRegister && (
+        <PatientRegistration
+          lang={lang}
+          onClose={() => setShowRegister(false)}
+          onRegistered={(p) => {
+            setRecognizedPatient({ name: p.name, visit_count: 1 });
+            setTimeout(() => setShowRegister(false), 1800);
+          }}
+          onRecognized={(p) => {
+            setRecognizedPatient(p);
+            if (p.language && ['en', 'te', 'hi', 'ta'].includes(p.language)) {
+              setAutoDetect(false);
+              setLang(p.language);
+            }
+            setTimeout(() => setShowRegister(false), 1800);
+          }}
+        />
+      )}
     </div>
   );
 }

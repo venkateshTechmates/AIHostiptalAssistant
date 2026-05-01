@@ -5,3 +5,9 @@ __pycache__/
 .env
 kiosk.db
 kiosk.db-*
+
+# Patient face images (PII — never commit)
+uploads/
+
+# Local log files
+*.log

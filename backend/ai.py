@@ -1,9 +1,15 @@
-"""GPT-4o conversational engine with function calling.
+"""GPT-4o conversational engine with function calling, caching, and history.
 
 Falls back to the rule-based router (`intents.route`) when no API key is
 configured, when the request fails, or when GPT-4o produces an empty reply.
 The response shape is identical to `intents.route` so the frontend never
 needs to know which engine handled the turn.
+
+New in v3.2:
+- Per-(language,text) response cache short-circuits repeat queries (~5 ms).
+- Conversation history persisted to SQLite per (kiosk_id, session_id) and
+  injected into the prompt for better continuity.
+- Tighter system prompt + lower max_tokens for sharper voice replies.
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ def is_enabled() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Tools exposed to GPT-4o (one per kiosk capability)
+# Tools exposed to GPT-4o
 # ---------------------------------------------------------------------------
 
 TOOLS: list[dict] = [
@@ -112,7 +118,7 @@ TOOLS: list[dict] = [
 
 
 # ---------------------------------------------------------------------------
-# Tool implementations — return JSON-serialisable dicts
+# Tool implementations
 # ---------------------------------------------------------------------------
 
 def _tool_get_directions(args: dict, lang: str) -> dict:
@@ -182,7 +188,7 @@ _TOOL_FNS = {
 
 
 # ---------------------------------------------------------------------------
-# System prompt
+# System prompt — tightened for fast & clear voice responses
 # ---------------------------------------------------------------------------
 
 _LANG_NAME = {"en": "English", "te": "Telugu (తెలుగు)", "hi": "Hindi (हिन्दी)", "ta": "Tamil (தமிழ்)"}
@@ -190,48 +196,88 @@ _LANG_NAME = {"en": "English", "te": "Telugu (తెలుగు)", "hi": "Hindi
 
 def _system_prompt(lang: str) -> str:
     lname = _LANG_NAME.get(lang, "English")
-    return f"""You are the friendly receptionist at City General Hospital. You help visitors find departments, doctors, and answer general questions.
+    return f"""You are the public-address announcer at NIMS Hospital (Nizam's Institute of Medical Sciences) — your replies are spoken aloud over speakers, in the calm, formal cadence of an Indian Railway station announcer.
 
-LANGUAGE: Respond ONLY in {lname}. If the user mixes English with their language (e.g. Tenglish, Hinglish), reply in {lname}. Match script: Telugu → తెలుగు lipi, Hindi → देवनागरी, Tamil → தமிழ் எழுத்து, English → Latin.
+LANGUAGE: Reply ONLY in {lname}. Match script: Telugu→తెలుగు, Hindi→देवनागरी, Tamil→தமிழ், English→Latin. If user code-mixes, still reply in {lname}.
 
-STYLE: Warm, brief (under 2 sentences for voice), reassuring. Speak like a kind receptionist, not a chatbot. No emoji in spoken text.
+ANNOUNCEMENT STYLE — CRITICAL:
+- ONE clear sentence. Maximum 20 words. Lead with the destination/answer.
+- Phrase like a station PA: "Attention please. The Pharmacy is located on the ground floor." / "Kripya dhyaan dijiye. Pharmacy ground floor par hai." / "దయచేసి శ్రద్ధ వహించండి. ఫార్మసీ గ్రౌండ్ ఫ్లోర్‌లో ఉంది."
+- Be polite and formal: use "Please", "Kindly", "దయచేసి", "कृपया", "தயவுசெய்து".
+- No filler ("Sure!", "Of course!", "Hello!"). No emoji. No greetings unless user said hello.
+- Use full forms, not slang. State floor, side, and landmark when giving directions.
 
 RULES:
-- For ANY medical emergency keywords (chest pain, bleeding, unconscious, fainted, ఛాతీ నొప్పి, सीने में दर्द, மார்பு வலி, etc.) IMMEDIATELY call trigger_emergency_alert THEN reply telling the user help is on the way and where the Emergency Ward is.
-- For "where is X" questions, ALWAYS call get_directions so the map can highlight the route.
-- For "I want to see a [specialty]" or doctor questions, call find_doctors.
-- NEVER give medical advice, diagnosis, or prescription guidance. If asked, suggest they speak to a doctor or staff.
-- Use available tools rather than guessing about hospital details.
+- For emergency keywords (chest pain, bleeding, unconscious, fainted, ఛాతీ నొప్పి, सीने में दर्द, மார்பு வலி): IMMEDIATELY call trigger_emergency_alert, THEN announce help is on the way and direct them to Emergency calmly.
+- For "where is X": ALWAYS call get_directions so the map highlights it.
+- For doctor/specialty queries: call find_doctors.
+- NEVER give medical advice or diagnose. Redirect to staff.
+- Use tools — never guess hospital details.
 
-Hospital info: 7 departments — Emergency (G/F), OPD (1/F), Pharmacy (G/F, 24h), Lab (G/F), Wards (2/F), Billing (G/F), Amenities (G/F)."""
+Hospital: 7 departments — Emergency (G/F), OPD (1/F), Pharmacy (G/F, 24h), Lab (G/F), Wards (2/F), Billing (G/F), Amenities (G/F)."""
 
 
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def chat(text: str, lang: str = "en", kiosk_id: str | None = None) -> dict[str, Any]:
+def chat(
+    text: str,
+    lang: str = "en",
+    kiosk_id: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
     """Run the conversational pipeline. Returns the same shape as intents.route."""
     if not is_enabled():
         return intents.route(text, lang)
 
-    # Always run the rule-based emergency check too — never let an LLM hiccup
+    # Cache hit short-circuit (skip LLM entirely for repeats).
+    cache_key = db.make_cache_key(lang, text)
+    cached = db.get_cached_response(cache_key)
+    if cached and not cached.get("alert"):
+        log.info("cache hit kiosk=%s lang=%s text=%r", kiosk_id, lang, text)
+        # Still log this turn so history reflects the user's actual interaction.
+        db.add_conversation_message(kiosk_id, session_id, "user", text, lang)
+        db.add_conversation_message(kiosk_id, session_id, "assistant", cached["reply"], lang)
+        return cached
+
+    # Always run rule-based emergency check too — never let an LLM hiccup
     # block a real emergency.
     norm = intents._normalise(text)
     is_em = any(intents._contains_keyword(norm, kw) for kw in EMERGENCY_KEYWORDS)
 
     try:
-        return _run_gpt(text, lang, kiosk_id, is_em)
-    except Exception as e:  # network, rate-limit, etc.
+        result = _run_gpt(text, lang, kiosk_id, session_id, is_em)
+    except Exception as e:
         log.warning("GPT-4o failure, falling back to rule-based router: %s", e)
         return intents.route(text, lang)
 
+    # Persist + cache (skip caching emergencies — they should always log fresh)
+    db.add_conversation_message(kiosk_id, session_id, "user", text, lang)
+    db.add_conversation_message(kiosk_id, session_id, "assistant", result.get("reply", ""), lang)
+    if not result.get("alert"):
+        try:
+            db.cache_response(cache_key, result)
+        except Exception as e:
+            log.warning("cache_response failed: %s", e)
+    return result
 
-def _run_gpt(text: str, lang: str, kiosk_id: str | None, is_emergency_hint: bool) -> dict[str, Any]:
-    messages: list[dict] = [
-        {"role": "system", "content": _system_prompt(lang)},
-        {"role": "user", "content": text},
-    ]
+
+def _run_gpt(
+    text: str,
+    lang: str,
+    kiosk_id: str | None,
+    session_id: str | None,
+    is_emergency_hint: bool,
+) -> dict[str, Any]:
+    messages: list[dict] = [{"role": "system", "content": _system_prompt(lang)}]
+
+    # Inject recent conversation history (last 4 turns) for continuity.
+    history = db.recent_conversation(kiosk_id, session_id, limit=4)
+    for h in history:
+        messages.append({"role": h["role"], "content": h["content"]})
+
+    messages.append({"role": "user", "content": text})
 
     map_target: str | None = None
     alert: bool = is_emergency_hint
@@ -239,15 +285,14 @@ def _run_gpt(text: str, lang: str, kiosk_id: str | None, is_emergency_hint: bool
     extra_options: list[dict] = []
     extra_data: dict[str, Any] | None = None
 
-    # Run a multi-step tool loop, capped at 3 to avoid cost surprises.
     for _ in range(3):
         resp = _client.chat.completions.create(  # type: ignore[union-attr]
             model=_MODEL,
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",
-            temperature=0.4,
-            max_tokens=300,
+            temperature=0.3,
+            max_tokens=180,
         )
         msg = resp.choices[0].message
         if msg.tool_calls:
@@ -302,12 +347,10 @@ def _run_gpt(text: str, lang: str, kiosk_id: str | None, is_emergency_hint: bool
                     "tool_call_id": tc.id,
                     "content": json.dumps(result, ensure_ascii=False),
                 })
-            continue  # let GPT see the tool results
-        # No tool calls — final answer
+            continue
         reply = (msg.content or "").strip()
         if not reply:
             return intents.route(text, lang)
-        # Default follow-up cards if GPT didn't produce structured options
         options = extra_options or intents._FOLLOW_UP.get(lang, intents._FOLLOW_UP["en"])
         return {
             "reply": reply,
@@ -318,5 +361,4 @@ def _run_gpt(text: str, lang: str, kiosk_id: str | None, is_emergency_hint: bool
             "data": extra_data,
         }
 
-    # Hit the loop cap without a final reply — fall back to rules.
     return intents.route(text, lang)

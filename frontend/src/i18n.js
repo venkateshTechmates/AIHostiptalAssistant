@@ -1,6 +1,7 @@
 // UI strings for the kiosk shell. Conversational replies come from the backend.
 
 export const LANGUAGES = [
+  { code: 'auto', label: 'Auto', name: 'Auto-detect', locale: 'en-IN' },
   { code: 'en', label: 'EN', name: 'English', locale: 'en-US' },
   { code: 'te', label: 'తెలు', name: 'తెలుగు', locale: 'te-IN' },
   { code: 'hi', label: 'हिं', name: 'हिन्दी', locale: 'hi-IN' },
@@ -19,6 +20,7 @@ const cards = {
     visiting_hours: 'Visiting hours',
     amenities: 'Amenities',
     talk: 'Talk to staff',
+    register: 'Register / Sign in',
   },
   te: {
     emergency: 'ఎమర్జెన్సీ',
@@ -31,6 +33,7 @@ const cards = {
     visiting_hours: 'సందర్శన సమయాలు',
     amenities: 'సౌకర్యాలు',
     talk: 'సిబ్బందితో మాట్లాడండి',
+    register: 'నమోదు / సైన్ ఇన్',
   },
   hi: {
     emergency: 'आपातकाल',
@@ -43,6 +46,7 @@ const cards = {
     visiting_hours: 'मिलने का समय',
     amenities: 'सुविधाएँ',
     talk: 'स्टाफ़ से बात करें',
+    register: 'पंजीकरण / साइन इन',
   },
   ta: {
     emergency: 'அவசரம்',
@@ -55,13 +59,14 @@ const cards = {
     visiting_hours: 'சந்திப்பு நேரம்',
     amenities: 'வசதிகள்',
     talk: 'ஊழியருடன் பேசு',
+    register: 'பதிவு / உள்நுழை',
   },
 };
 
 export const STRINGS = {
   en: {
     locale: 'en-US',
-    hospital: 'City General Hospital',
+    hospital: 'NIMS Hospital',
     welcomeTitle: 'Hello — how can I help?',
     welcomeSub: 'Tap any option below or press the mic to speak.',
     tapMic: 'Tap to speak',
@@ -95,7 +100,7 @@ export const STRINGS = {
   },
   te: {
     locale: 'te-IN',
-    hospital: 'సిటీ జనరల్ హాస్పిటల్',
+    hospital: 'నిమ్స్ హాస్పిటల్',
     welcomeTitle: 'నమస్కారం — నేను ఎలా సహాయం చేయగలను?',
     welcomeSub: 'క్రింద ఏదైనా ఎంపికను నొక్కండి లేదా మాట్లాడటానికి మైక్ నొక్కండి.',
     tapMic: 'మాట్లాడటానికి నొక్కండి',
@@ -129,7 +134,7 @@ export const STRINGS = {
   },
   hi: {
     locale: 'hi-IN',
-    hospital: 'सिटी जनरल अस्पताल',
+    hospital: 'निम्स अस्पताल',
     welcomeTitle: 'नमस्ते — मैं आपकी कैसे मदद करूँ?',
     welcomeSub: 'नीचे कोई विकल्प चुनें या माइक दबाकर बोलें।',
     tapMic: 'बोलने के लिए दबाएँ',
@@ -163,7 +168,7 @@ export const STRINGS = {
   },
   ta: {
     locale: 'ta-IN',
-    hospital: 'சிட்டி ஜெனரல் மருத்துவமனை',
+    hospital: 'நிம்ஸ் மருத்துவமனை',
     welcomeTitle: 'வணக்கம் — எப்படி உதவ முடியும்?',
     welcomeSub: 'கீழே ஒரு விருப்பத்தை தேர்ந்தெடுக்கவும் அல்லது மைக் அழுத்தி பேசவும்.',
     tapMic: 'பேச அழுத்தவும்',
@@ -199,6 +204,7 @@ export const STRINGS = {
 
 export const HOME_CARDS = [
   { id: 'emergency', icon: '🚨', kind: 'emergency' },
+  { id: 'register', icon: '🪪' },
   { id: 'opd', icon: '🏥' },
   { id: 'doctor', icon: '👨‍⚕️' },
   { id: 'pharmacy', icon: '💊' },

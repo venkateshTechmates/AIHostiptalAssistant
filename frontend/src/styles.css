@@ -450,3 +450,131 @@ button { font-family: inherit; cursor: pointer; }
 
 /* ---------------- Accessibility / large tap ---------------- */
 button:focus-visible { outline: 3px solid #ffbd2e; outline-offset: 3px; }
+
+/* ---------------- Patient registration modal ---------------- */
+.modal-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9999;
+  animation: fade-in 0.18s ease;
+}
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+.modal {
+  background: #fff; border-radius: 18px; padding: 24px 28px;
+  max-width: 920px; width: calc(100vw - 48px); max-height: 92vh;
+  overflow-y: auto;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.22);
+}
+.modal__head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 4px;
+}
+.modal__head h2 { margin: 0; font-size: 22px; }
+.modal__sub { color: var(--ink-soft); margin: 0 0 18px 0; font-size: 14px; }
+.modal__success { text-align: center; padding: 28px 12px; }
+.modal__success h3 { margin: 12px 0 24px 0; font-size: 20px; }
+
+.reg-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
+}
+.reg-col { display: flex; flex-direction: column; gap: 12px; }
+.reg-col--form label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 13px; color: var(--ink-soft); font-weight: 600;
+}
+.reg-col--form input {
+  padding: 10px 12px; border: 1.5px solid #d8dde5; border-radius: 10px;
+  font-size: 16px; color: var(--ink); background: #fff;
+  transition: border-color 0.15s ease;
+}
+.reg-col--form input:focus {
+  outline: none; border-color: var(--primary);
+}
+.reg-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 8px; }
+
+.face-capture { display: flex; flex-direction: column; gap: 10px; }
+.face-capture__stage {
+  position: relative; aspect-ratio: 4 / 3; background: #000;
+  border-radius: 12px; overflow: hidden;
+}
+.face-capture__video, .face-capture__overlay {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover;
+}
+.face-capture__overlay { pointer-events: none; }
+.face-capture__status { font-size: 13px; color: var(--ink-soft); min-height: 18px; }
+
+.primary-btn {
+  background: var(--primary); color: #fff; border: none;
+  padding: 12px 20px; border-radius: 12px; font-size: 16px; font-weight: 600;
+  cursor: pointer; transition: filter 0.15s ease, opacity 0.15s ease;
+}
+.primary-btn:hover:not(:disabled) { filter: brightness(1.08); }
+.primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.welcome-banner {
+  background: linear-gradient(120deg, #ecfdf5, #d1fae5);
+  border: 1.5px solid #10b981;
+  color: #065f46;
+  padding: 12px 16px; border-radius: 12px;
+  font-weight: 600; margin-bottom: 12px;
+  display: flex; align-items: center; gap: 10px;
+}
+
+@media (max-width: 720px) {
+  .reg-grid { grid-template-columns: 1fr; }
+}
+
+/* ---------------- Presence detector (ambient webcam) ---------------- */
+.presence {
+  position: fixed;
+  right: 20px; bottom: 20px;
+  width: 280px;
+  background: #0f172a; color: #fff;
+  border-radius: 14px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
+  overflow: hidden;
+  z-index: 30;
+  font-size: 13px;
+  border: 1.5px solid rgba(255, 255, 255, 0.08);
+}
+.presence--mini { width: 180px; }
+.presence__head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.presence__dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 8px #22c55e;
+  animation: presence-pulse 1.6s ease-in-out infinite;
+}
+@keyframes presence-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.presence__title { font-weight: 600; flex: 1; letter-spacing: 0.02em; }
+.presence__btn {
+  background: transparent; border: none; color: #cbd5e1;
+  cursor: pointer; padding: 2px 8px; border-radius: 6px;
+  font-size: 14px;
+}
+.presence__btn:hover { background: rgba(255, 255, 255, 0.08); }
+.presence__stage {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  background: #000;
+}
+.presence__video, .presence__overlay {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover;
+}
+.presence__overlay { pointer-events: none; }
+.presence__status {
+  position: absolute; left: 8px; bottom: 8px;
+  background: rgba(15, 23, 42, 0.7);
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 12px;
+}
