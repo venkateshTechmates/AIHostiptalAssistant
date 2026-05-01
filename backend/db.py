@@ -387,19 +387,47 @@ def log_patient_visit(
     session_id: str | None,
     language: str,
     distance: float,
-) -> None:
+    revisit_min_hours: float = 4.0,
+) -> tuple[bool, int]:
+    """Log a patient visit, but only if `revisit_min_hours` has elapsed since
+    their last visit. Returns (is_new_visit, current_visit_count).
+
+    Same person standing in front of the camera for hours triggers many
+    recognition probes — we don't want each one to inflate visit_count.
+    """
     with _connect() as conn:
+        row = conn.execute(
+            "SELECT visit_count, "
+            "(strftime('%s', 'now') - strftime('%s', last_visit_at)) AS seconds_since "
+            "FROM patients WHERE id = ?",
+            (patient_id,),
+        ).fetchone()
+        if not row:
+            return False, 0
+        current_count = row["visit_count"] or 0
+        seconds_since = row["seconds_since"] if row["seconds_since"] is not None else 999_999
+        cutoff = revisit_min_hours * 3600
+        if seconds_since < cutoff:
+            # Within the same window — just touch last_visit_at, don't bump count.
+            conn.execute(
+                "UPDATE patients SET last_visit_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (patient_id,),
+            )
+            conn.commit()
+            return False, current_count
+        # New visit window — log it and bump counter.
         conn.execute(
             "INSERT INTO patient_visits (patient_id, kiosk_id, session_id, language, distance) "
             "VALUES (?, ?, ?, ?, ?)",
             (patient_id, kiosk_id, session_id, language, distance),
         )
         conn.execute(
-            "UPDATE patients SET last_visit_at = CURRENT_TIMESTAMP, visit_count = visit_count + 1 "
-            "WHERE id = ?",
+            "UPDATE patients SET last_visit_at = CURRENT_TIMESTAMP, "
+            "visit_count = visit_count + 1 WHERE id = ?",
             (patient_id,),
         )
         conn.commit()
+        return True, current_count + 1
 
 
 # ---------------------------------------------------------------------------

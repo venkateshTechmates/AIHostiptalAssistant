@@ -200,12 +200,20 @@ class RecognizeRequest(BaseModel):
 
 @app.post("/api/patients/recognize")
 def recognize_patient(req: RecognizeRequest) -> dict[str, Any]:
-    """Look up a patient by face descriptor. Returns name + greeting on match."""
+    """Look up a patient by face descriptor. Returns name + greeting on match.
+
+    A new visit is logged ONLY if at least PATIENT_REVISIT_HOURS have passed
+    since the patient's last visit. Otherwise we still return matched=True
+    (so the kiosk recognises them) but do not inflate visit_count.
+    """
+    import os as _os
+    revisit_hours = float(_os.environ.get("PATIENT_REVISIT_HOURS", "4"))
     match = patients.find_match(req.descriptor)
     if not match:
         return {"matched": False}
-    db.log_patient_visit(
-        match["id"], req.kiosk_id, req.session_id, req.language, match["distance"]
+    is_new_visit, visit_count = db.log_patient_visit(
+        match["id"], req.kiosk_id, req.session_id, req.language,
+        match["distance"], revisit_min_hours=revisit_hours,
     )
     patient = db.get_patient(match["id"])
     return {
@@ -213,7 +221,8 @@ def recognize_patient(req: RecognizeRequest) -> dict[str, Any]:
         "id": match["id"],
         "name": match["name"],
         "distance": match["distance"],
-        "visit_count": patient["visit_count"] if patient else 1,
+        "visit_count": visit_count,
+        "is_new_visit": is_new_visit,
         "language": patient["language"] if patient else "en",
     }
 

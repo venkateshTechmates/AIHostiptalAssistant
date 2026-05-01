@@ -356,29 +356,39 @@ export default function App() {
         active={presenceOn && !alert}
         language={lang}
         onRecognized={(p) => {
-          // Avoid spamming the welcome banner if same patient is in front of cam.
+          // Skip if we already greeted this patient in the current session.
           if (recognizedIdRef.current === p.id) return;
           recognizedIdRef.current = p.id;
-          setRecognizedPatient(p);
+
           const targetLang = (p.language && ['en', 'te', 'hi', 'ta'].includes(p.language)) ? p.language : lang;
           if (targetLang !== lang) {
             setAutoDetect(false);
             setLang(targetLang);
           }
           if (!primed) setPrimed(true);
-          // Speak a quick localised greeting via TTS — instant, no GPT-4o call.
-          const greetings = {
-            en: `Welcome back, ${p.name}. Visit number ${p.visit_count}.`,
-            te: `స్వాగతం, ${p.name}. సందర్శన నంబర్ ${p.visit_count}.`,
-            hi: `स्वागत है, ${p.name}. यात्रा संख्या ${p.visit_count}.`,
-            ta: `வரவேற்கிறோம், ${p.name}. வருகை எண் ${p.visit_count}.`,
-          };
-          voice.speak(greetings[targetLang] || greetings.en, targetLang);
-          // Banner auto-clears after 8s; reset id so they can be re-greeted on a new session.
-          setTimeout(() => {
-            setRecognizedPatient(null);
-            recognizedIdRef.current = null;
-          }, 8000);
+
+          if (p.is_new_visit) {
+            // First visit in this 4-hour window — full greeting + banner.
+            setRecognizedPatient(p);
+            const greetings = {
+              en: `Welcome back, ${p.name}. Visit number ${p.visit_count}.`,
+              te: `స్వాగతం, ${p.name}. సందర్శన నంబర్ ${p.visit_count}.`,
+              hi: `स्वागत है, ${p.name}. यात्रा संख्या ${p.visit_count}.`,
+              ta: `வரவேற்கிறோம், ${p.name}. வருகை எண் ${p.visit_count}.`,
+            };
+            voice.speak(greetings[targetLang] || greetings.en, targetLang);
+            setTimeout(() => {
+              setRecognizedPatient(null);
+              recognizedIdRef.current = null;
+            }, 8000);
+          } else {
+            // Already recognised within the last 4 hours — short, silent banner.
+            setRecognizedPatient({ ...p, _silent: true });
+            setTimeout(() => {
+              setRecognizedPatient(null);
+              recognizedIdRef.current = null;
+            }, 4000);
+          }
         }}
         onUnknownFaceLingering={() => {
           // Don't pop the modal if user is already mid-conversation.
